@@ -34,4 +34,4 @@ These files correspond to the **first edition, 2026**. Microsoft Foundry and Azu
 
 ## License
 
-The book text remains separately copyrighted. Add a software license to this repository only after the rights holder has chosen the desired reuse terms for the companion code.
+Copyright © 2026 Edmund Ashcombe. All rights reserved. This repository is provided as the book’s companion reference; 
