@@ -6,8 +6,6 @@ This repository is the reader companion to **Azure AI Engineer in Practice: Buil
 
 The chapter files reproduce the **code blocks printed in Chapters 1–7 of the book, in book order**. They are provided here so you can use GitHub's Copy button instead of retyping code from the printed or Kindle edition.
 
-No architect-review reports, publishing notes, CI infrastructure, unit-test harnesses, internal validation scripts, or additional helper implementation are included in this reader edition.
-
 ## Important: how to use the snippets
 
 The book builds one system progressively. A later snippet can depend on variables, imports, Azure resources, or functions established earlier in the same chapter or in an earlier chapter. Therefore:
