@@ -1,13 +1,11 @@
-# Chapter 2 — Text Analysis and Speech for Agentic Systems
+# Chapter 2 — Text and Speech
 
-> These code blocks are reproduced from the book in the order they appear. Read the surrounding book section for setup, dependencies, interpretation, and caveats.
+These examples follow the book in chapter order. Read the surrounding section for prerequisites, configuration, and security guidance. Some blocks show example output or partial commands rather than standalone scripts.
 
 
 ## Extracting structured JSON via generative prompting
 
-
 ### Code block 1
-
 
 ```python
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
@@ -25,13 +23,11 @@ client = OpenAI(
     api_key=token_provider,
 )
 intake_note = (
-```
-
-
-### Code block 2
-
-
-```python
+    "Customer reports a kitchen pipe burst on 2026-08-14, water damage to "
+    "flooring and cabinetry, estimated at $18,400. Second claim from this "
+    "policyholder in six months."
+)
+ 
 from pydantic import BaseModel
 from typing import Literal
 
@@ -54,9 +50,7 @@ result = response.output_parsed.model_dump()
 print(json.dumps(result, indent=2))
 ```
 
-
-### Code block 3
-
+### Code block 2
 
 ```python
 def extract_claim_fields(note_text: str) -> dict:
@@ -75,106 +69,125 @@ result = extract_claim_fields(intake_note)
 print(json.dumps(result, indent=2))
 ```
 
+### Code block 3
+
+```json
+{
+  "claim_type": "property",
+  "incident_date": "2026-08-14",
+  "requires_human_review": true,
+  "review_reason": "High estimated damage amount combined with a second claim from the same policyholder within six months."
+}
+```
+
 
 ## Detecting sentiment, tone, and sensitive content
 
-
 ### Code block 4
-
 
 ```python
 from azure.ai.contentsafety import ContentSafetyClient
 from azure.ai.contentsafety.models import AnalyzeTextOptions
-```
-
-
-### Code block 5
-
-
-```text
+ 
 safety_client = ContentSafetyClient(
     endpoint="https://aif-ai103-labs.cognitiveservices.azure.com/",
     credential=credential,
-```
-
-
-### Code block 6
-
-
-```python
+)
+ 
 analysis = safety_client.analyze_text(
-```
-
-
-### Code block 7
-
-
-```text
+    AnalyzeTextOptions(text=intake_note)
+)
 for category in analysis.categories_analysis:
     print(f"{category.category}: severity {category.severity}")
+```
+
+### Code block 5
+
+```text
+Hate: severity 0
+SelfHarm: severity 0
+Sexual: severity 0
+Violence: severity 0
 ```
 
 
 ## Nuanced sentiment and tone beyond a three-way label
 
+### Code block 6
 
-### Code block 8
-
-
-```text
+```python
 tone_response = client.chat.completions.create(
     model="chat-primary",
     messages=[
+        {"role": "system", "content": (
+            "Classify the policyholder's tone as one of: neutral, frustrated, "
+            "or escalation_risk. escalation_risk means language suggesting legal "
+            "action, regulatory complaint, or public/social media escalation. "
+            "Respond with only the label."
+        )},
+        {"role": "user", "content": (
+            "This is the third time I've called about this claim. If it isn't "
+            "resolved by Friday I'm contacting the insurance commissioner."
+        )},
+    ],
+)
+print(tone_response.choices[0].message.content)
 ```
 
-
-### Code block 9
-
+### Code block 7
 
 ```text
-print(tone_response.choices[0].message.content)
+escalation_risk
 ```
 
 
 ## Customizing outputs for domain-specific tasks
 
+### Code block 8
 
-### Code block 10
-
-
-```text
+```python
 compliance_summary = client.chat.completions.create(
     model="chat-primary",
     messages=[
+        {"role": "system", "content": (
+            "Summarize this claims call transcript for a compliance audit log. "
+            "The summary must: (1) state whether the caller was informed of their "
+            "right to appeal, (2) note if any promise of a specific payout amount "
+            "was made — agents are not authorized to guarantee amounts, and (3) "
+            "flag if the call exceeded 15 minutes without documented resolution. "
+            "Do not include the caller's full name; refer to them as 'the caller'."
+        )},
+        {"role": "user", "content": transcript},
+    ],
+)
 ```
 
 
 ## Translation: Foundry Tool connection vs. LLM-powered flow
 
-
-### Code block 11
-
+### Code block 9
 
 ```python
 translated = client.chat.completions.create(
     model="chat-primary",
     messages=[
+        {"role": "system", "content": "Translate the user's message to English. Respond with only the translation, no commentary."},
+        {"role": "user", "content": "Un tuyau a éclaté dans la cuisine le 14 août, causant des dégâts d'eau importants."},
+    ],
+)
+print(translated.choices[0].message.content)
 ```
 
-
-### Code block 12
-
+### Code block 10
 
 ```text
-print(translated.choices[0].message.content)
+A pipe burst in the kitchen on August 14, causing significant water damage.
 ```
 
 
 ## Speech as an agent modality, not a standalone transcription service
 
-
-### Code block 13
-
+### Code block 11
 
 ```bash
 az cognitiveservices account create \
@@ -182,21 +195,15 @@ az cognitiveservices account create \
   --resource-group rg-ai103-labs \
   --kind SpeechServices \
   --sku S0 \
-```
-
-
-### Code block 14
-
-
-```bash
+  --location eastus2
+ 
 az role assignment create \
   --assignee "$IDENTITY_PRINCIPAL_ID" \
   --role "Cognitive Services Speech User" \
+  --scope "/subscriptions/<sub-id>/resourceGroups/rg-ai103-labs/providers/Microsoft.CognitiveServices/accounts/spch-ai103-labs"
 ```
 
-
-### Code block 15
-
+### Code block 12
 
 ```python
 import azure.cognitiveservices.speech as speechsdk
@@ -227,14 +234,24 @@ def speak(text: str) -> None:
         raise RuntimeError(f"Speech synthesis failed: {result.reason}")
 # Exercise both functions against the opening scenario's intake call
 transcript = transcribe("intake_call.wav")
+speak(
+    "I've logged your claim as property damage from a water incident. "
+    "Because of the estimated amount, an adjuster will review it within one business day."
+)
+```
+
+### Code block 13
+
+```text
+Transcript: "There was a pipe burst in my kitchen on August fourteenth, water everywhere,
+probably eighteen or nineteen thousand dollars in damage."
+[audio output synthesized and played/saved]
 ```
 
 
 ## Translating spoken audio
 
-
-### Code block 16
-
+### Code block 14
 
 ```python
 def transcribe_and_translate(audio_file_path: str, target_language: str = "en") -> str:
@@ -260,46 +277,26 @@ def transcribe_and_translate(audio_file_path: str, target_language: str = "en") 
 
 ## Hands-on lab: the full text-and-speech agent tool
 
+### Code block 15
 
-### Code block 17
-
-
-```text
+```python
 LIVE_ESCALATION_SEVERITY = 4  # Example policy threshold for this fictional claims workflow.
 def process_claim_intake(audio_file_path: str) -> dict:
     transcript = transcribe(audio_file_path)  # speech-to-text, as above
-```
-
-
-### Code block 18
-
-
-```text
+ 
     safety_result = safety_client.analyze_text(AnalyzeTextOptions(text=transcript))
     if any(cat.severity >= LIVE_ESCALATION_SEVERITY for cat in safety_result.categories_analysis):
         return {"status": "escalated", "reason": "sensitive content detected", "transcript": transcript}
-```
-
-
-### Code block 19
-
-
-```text
+ 
     extracted = extract_claim_fields(transcript)  # JSON-schema extraction, as above
-```
-
-
-### Code block 20
-
-
-```text
+ 
     confirmation_text = (
-```
-
-
-### Code block 21
-
-
-```text
+        f"I've logged your claim as {extracted['claim_type']} damage. "
+        + ("An adjuster will review it shortly." if extracted["requires_human_review"]
+           else "It has been queued for standard processing.")
+    )
+    speak(confirmation_text)  # text-to-speech, as above
+ 
     return {"status": "processed", "extraction": extracted, "transcript": transcript}
 ```
+

@@ -1,13 +1,11 @@
-# Chapter 1 — Foundations of Azure AI Engineering and the AI-103 Landscape
+# Chapter 1 — Foundations
 
-> These code blocks are reproduced from the book in the order they appear. Read the surrounding book section for setup, dependencies, interpretation, and caveats.
+These examples follow the book in chapter order. Read the surrounding section for prerequisites, configuration, and security guidance. Some blocks show example output or partial commands rather than standalone scripts.
 
 
 ## Hands-on lab: provisioning the resource group and Foundry project
 
-
 ### Code block 1
-
 
 ```bash
 az account set --subscription "<your-subscription-id>"
@@ -15,12 +13,18 @@ az group show --name rg-ai103-labs --output table
 az configure --defaults group=rg-ai103-labs location=eastus2
 ```
 
+### Code block 2
+
+```text
+Name           Location    Status
+-------------  ----------  ---------
+rg-ai103-labs  eastus2     Succeeded
+```
+
 
 ## Deployment options and why "just deploy it" isn't a complete plan
 
-
-### Code block 2
-
+### Code block 3
 
 ```bash
 az cognitiveservices model list \
@@ -36,44 +40,55 @@ az cognitiveservices account deployment create \
 --model-version "2025-08-07" \
   --model-format OpenAI \
   --sku-capacity 10 \
+--sku-name GlobalStandard
+```
+
+### Code block 4
+
+```json
+{
+  "name": "chat-primary",
+  "properties": {
+"model": { "name": "gpt-5-mini", "format": "OpenAI", "version": "2025-08-07" },
+    "provisioningState": "Succeeded",
+    "rateLimits": [
+      { "key": "token", "renewalPeriod": 60, "count": 10000 }
+    ]
+  }
+}
 ```
 
 
 ## Quotas, scaling, and cost footprints
 
-
-### Code block 3
-
+### Code block 5
 
 ```bash
 az cognitiveservices usage list \
   --location eastus2 \
+  --output table
+```
+
+### Code block 6
+
+```text
+Name                         CurrentValue    Limit
+---------------------------  --------------  -------
+OpenAI.GlobalStandard.gpt-5-mini  10              300
+OpenAI.GlobalStandard.text-embedding-3-large   0               50
 ```
 
 
 ## Identity and access: the RBAC and Key Vault pattern this book uses everywhere
 
-
-### Code block 4
-
+### Code block 7
 
 ```bash
 az identity create --name id-ai103-labs --resource-group rg-ai103-labs
-```
-
-
-### Code block 5
-
-
-```bash
+ 
 IDENTITY_PRINCIPAL_ID=$(az identity show --name id-ai103-labs \
-```
-
-
-### Code block 6
-
-
-```bash
+  --resource-group rg-ai103-labs --query principalId -o tsv)
+ 
 PROJECT_ID=$(az cognitiveservices account project show \
   --name aif-ai103-labs \
   --resource-group rg-ai103-labs \
@@ -85,113 +100,92 @@ az role assignment create \
   --assignee "$IDENTITY_PRINCIPAL_ID" \
   --role "53ca6127-db72-4b80-b1b0-d745d6d5456d" \
   --scope "$PROJECT_ID"
-
-Foundry User is the current least-privilege developer role for building and testing inside a Foundry project. Microsoft explicitly recommends it instead of the older Azure AI Developer role for current Foundry projects. The role is scoped to proj-claims-demo here so the identity does not gain development rights across unrelated projects.
-
-This is the pattern, not the complete role list: id-ai103-labs will still need separate, narrowly scoped data-plane roles when later chapters add services that are not covered by Foundry project RBAC — for example, Cognitive Services Speech User on the Speech resource and Search Service Contributor plus Search Index Data Contributor on Azure AI Search.
 ```
-
-
-### Code block 7
-
-
-```bash
-az keyvault create --name kv-ai103-labs --resource-group rg-ai103-labs
-```
-
 
 ### Code block 8
 
-
 ```bash
+az keyvault create --name kv-ai103-labs --resource-group rg-ai103-labs
+ 
 az role assignment create \
   --assignee "$IDENTITY_PRINCIPAL_ID" \
   --role "Key Vault Secrets User" \
-```
-
-
-### Code block 9
-
-
-```bash
+  --scope "/subscriptions/<sub-id>/resourceGroups/rg-ai103-labs/providers/Microsoft.KeyVault/vaults/kv-ai103-labs"
+ 
 az keyvault secret set --vault-name kv-ai103-labs \
+  --name demo-third-party-key --value "placeholder-rotate-before-use"
 ```
 
 
 ## Connecting Foundry projects to CI/CD
 
-
-### Code block 10
-
+### Code block 9
 
 ```yaml
 # .github/workflows/foundry-infra-check.yml
-```
-
-
-### Code block 11
-
-
-```bash
+name: foundry-infra-check
+on:
+  pull_request:
+    paths:
+      - 'infra/**'
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Azure login (OIDC, no stored secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Validate Bicep
+        run: |
           az deployment group validate \
             --resource-group rg-ai103-labs \
+            --template-file infra/foundry.bicep
 ```
 
-
-### Code block 12
-
+### Code block 10
 
 ```bash
 az ad app create --display-name app-ai103-labs-cicd
-```
-
-
-### Code block 13
-
-
-```bash
+ 
 APP_ID=$(az ad app list --display-name app-ai103-labs-cicd --query "[0].appId" -o tsv)
-```
-
-
-### Code block 14
-
-
-```bash
+ 
 az ad app federated-credential create --id "$APP_ID" --parameters '{
+  "name": "gh-actions-main",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:<your-org>/<your-repo>:ref:refs/heads/main",
+  "audiences": ["api://AzureADTokenExchange"]
+}'
 # A second credential is needed when the same workflow authenticates on pull_request:
 az ad app federated-credential create --id "$APP_ID" --parameters '{
   "name": "gh-actions-pr",
   "issuer": "https://token.actions.githubusercontent.com",
   "subject": "repo:<your-org>/<your-repo>:pull_request",
   "audiences": ["api://AzureADTokenExchange"]
-}'
+}' 
 ```
 
-
-### Code block 15
-
+### Code block 11
 
 ```bash
 az ad sp create --id "$APP_ID"
-```
-
-
-### Code block 16
-
-
-```bash
+ 
+RG_ID=$(az group show --name rg-ai103-labs --query id -o tsv)
 az role assignment create \
   --assignee "$APP_ID" \
-  --role "Contributor" \
+  --role "Contributor" --scope "$RG_ID"
 ```
 
 
 ## Closing the loop: budget, and the mistake that survives good planning
 
-
-### Code block 17
-
+### Code block 12
 
 ```bash
 az consumption budget create \
@@ -201,4 +195,6 @@ az consumption budget create \
   --time-grain monthly \
   --start-date $(date -u +%Y-%m-01) \
   --end-date 2027-01-01 \
+--resource-group rg-ai103-labs
 ```
+

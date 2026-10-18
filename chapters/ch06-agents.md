@@ -1,13 +1,11 @@
-# Chapter 6 — Agentic AI Patterns: Orchestration, Tools, and Multi-Agent Systems
+# Chapter 6 — Agents
 
-> These code blocks are reproduced from the book in the order they appear. Read the surrounding book section for setup, dependencies, interpretation, and caveats.
+These examples follow the book in chapter order. Read the surrounding section for prerequisites, configuration, and security guidance. Some blocks show example output or partial commands rather than standalone scripts.
 
 
 ## Defining an agent: roles, goals, and tool schemas
 
-
 ### Code block 1
-
 
 ```python
 from azure.ai.projects.models import PromptAgentDefinition, FunctionTool
@@ -47,11 +45,9 @@ triage_agent = project_client.agents.create_version(
 
 ## Conversation tracking: Conversations and Responses
 
-
 ### Code block 2
 
-
-```python
+```text
 openai = project_client.get_openai_client()
 conversation = openai.conversations.create()
 
@@ -80,57 +76,50 @@ print(response.output_text)
 
 ## Function calling with the Responses API
 
-
 ### Code block 3
-
 
 ```python
 import json
 
-TOOL_FUNCTIONS = {
-    "search_policy_documents": search_policy_documents,
-    "process_claim_intake": process_claim_intake,
-}
-
-def run_response_with_tools(openai_client, agent, user_input: str):
-    conversation = openai_client.conversations.create()
-    agent_ref = {
-        "agent_reference": {"name": agent.name, "id": agent.id, "type": "agent_reference"}
-    }
-    response = openai_client.responses.create(
-        conversation=conversation.id,
-        extra_body=agent_ref,
-        input=user_input,
+# This illustrative dispatcher deliberately allows only a read-only tool.
+# `caller` comes from verified application authentication, never model text.
+def run_response_with_tools(agent_client, user_input: str, caller):
+    conversation = agent_client.conversations.create()
+    response = agent_client.responses.create(
+        conversation=conversation.id, input=user_input
     )
-
-    tool_outputs = []
-    for item in response.output:
-        if item.type != "function_call":
-            continue
-        fn = TOOL_FUNCTIONS[item.name]
-        result = fn(**json.loads(item.arguments))
-        tool_outputs.append({
-            "type": "function_call_output",
-            "call_id": item.call_id,
-            "output": json.dumps(result),
-        })
-
-    if not tool_outputs:
-        return response
-
-    return openai_client.responses.create(
-        conversation=conversation.id,
-        extra_body=agent_ref,
-        input=tool_outputs,
-    )
+    for _ in range(8):  # bounded tool-round-trip loop
+        outputs = []
+        for item in response.output:
+            if item.type != "function_call":
+                continue
+            if item.name != "search_policy_documents":
+                raise PermissionError("Tool not in the application allowlist")
+            args = json.loads(item.arguments)
+            if (not isinstance(args, dict) or set(args) != {"query"}
+                    or not isinstance(args["query"], str)
+                    or not 1 <= len(args["query"].strip()) <= 500):
+                raise ValueError("Invalid search arguments")
+            if "policy:read" not in caller.permissions:
+                raise PermissionError("Caller cannot search policies")
+            result = search_policy_documents(args["query"])
+            outputs.append({"type": "function_call_output",
+                            "call_id": item.call_id,
+                            "output": json.dumps(result)})
+        if not outputs:
+            return response
+        response = agent_client.responses.create(
+            conversation=conversation.id, input=outputs
+        )
+    if any(i.type == "function_call" for i in response.output):
+        raise RuntimeError("Agent exceeded tool-call iteration limit")
+    return response
 ```
 
 
 ## Integrating agent tools: beyond function calling
 
-
 ### Code block 4
-
 
 ```python
 def analyze_intake_document(document_url: str) -> dict:
@@ -174,16 +163,12 @@ reference_agent = project_client.agents.create_version(
         ],
     ),
 )
-
-For small, static document sets, File Search removes the need to build a separate Search ingestion pipeline. The OpenAI-compatible client owns the file/vector-store operations; the resulting vector-store ID is then attached to the versioned prompt agent.
 ```
 
 
 ## Orchestrating hybrid LLM-and-rules-engine systems
 
-
 ### Code block 5
-
 
 ```python
 def check_coverage_limit_deterministic(claim_type: str, policy_tier: str) -> float:
@@ -194,96 +179,67 @@ def check_coverage_limit_deterministic(claim_type: str, policy_tier: str) -> flo
 
 ## Multi-agent orchestration: supervisor/worker, done for real
 
-
 ### Code block 6
 
-
-```text
+```python
+ 
 research_agent = project_client.agents.create_version(
     agent_name="claims-research-agent",
     definition=PromptAgentDefinition(
         model="chat-primary",
-        instructions="Research policy coverage for the supplied claim. Do not make routing decisions.",
+        instructions="Research policy evidence; never decide claim outcomes.",
         tools=[search_tool],
     ),
 )
-
 summarization_agent = project_client.agents.create_version(
     agent_name="claims-summarization-agent",
     definition=PromptAgentDefinition(
         model="chat-primary",
-        instructions="Produce a concise compliance-formatted summary of the supplied research.",
+        instructions="Summarize supplied policy research for compliance review.",
     ),
 )
-
 action_agent = project_client.agents.create_version(
     agent_name="claims-action-agent",
     definition=PromptAgentDefinition(
         model="chat-primary",
-        instructions="Recommend a routing queue from the supplied summary. Do not execute the route.",
+        instructions="Recommend a routing queue; never execute the route.",
     ),
 )
 
-def invoke_named_agent(agent, payload: dict) -> str:
-    conversation = openai.conversations.create()
-    response = openai.responses.create(
-        conversation=conversation.id,
-        extra_body={"agent_reference": {"name": agent.name, "id": agent.id, "type": "agent_reference"}},
-        input=json.dumps(payload),
+def invoke_named_agent(agent, payload: dict, caller) -> str:
+    # Pre-bind the client to the named agent (documented Foundry pattern).
+    agent_client = project_client.get_openai_client(agent_name=agent.name)
+    response = run_response_with_tools(
+        agent_client, json.dumps(payload), caller
     )
-    # If this agent emits a function_call, use the same function-call-output
-    # round trip shown earlier before consuming response.output_text.
     return response.output_text
 
-def supervisor_orchestrate(claim_details: dict) -> dict:
-    research = invoke_named_agent(research_agent, claim_details)
-    summary = invoke_named_agent(summarization_agent, {"research": research})
-    routing = invoke_named_agent(action_agent, {"summary": summary})
+def supervisor_orchestrate(claim_details: dict, caller) -> dict:
+    research = invoke_named_agent(research_agent, claim_details, caller)
+    summary = invoke_named_agent(
+        summarization_agent, {"research": research}, caller
+    )
+    routing = invoke_named_agent(action_agent, {"summary": summary}, caller)
     return {"research": research, "summary": summary, "decision": routing}
-
-This is genuine multi-agent orchestration because three separately versioned agents have distinct roles; the research agent additionally has policy-search access. The supervisor is ordinary code because the sequence is fixed. A dynamic LLM supervisor is justified only when the route itself varies by case.
 ```
 
 
 ## Autonomous workflows, safeguards, and approval checkpoints
 
-
 ### Code block 7
-
 
 ```python
 import uuid
-```
-
-
-### Code block 8
-
-
-```python
+ 
 def queue_for_human_approval(action: dict) -> str:
-```
-
-
-### Code block 9
-
-
-```text
+    """Write the pending action to a durable queue an adjuster's review
+    dashboard polls — the specific queue technology (Storage Queue, Service
+    Bus, a database table) is an implementation detail; what matters here is
+    that the action does not execute until a person acts on this record."""
     approval_request_id = str(uuid.uuid4())
-```
-
-
-### Code block 10
-
-
-```text
+    approval_queue_client.send_message(json.dumps({"id": approval_request_id, "action": action, "status": "pending"}))
     return approval_request_id
-```
-
-
-### Code block 11
-
-
-```python
+ 
 def execute_action_with_approval(action: dict, requires_approval: bool) -> dict:
     if requires_approval:
         approval_request_id = queue_for_human_approval(action)
@@ -294,30 +250,20 @@ def execute_action_with_approval(action: dict, requires_approval: bool) -> dict:
 
 ## Monitoring, evaluation, and error analysis
 
-
-### Code block 12
-
+### Code block 8
 
 ```text
-Current Foundry agents emit server-side traces that can be viewed in the Foundry portal once tracing is enabled. For application-side visibility, instrument your agent code with OpenTelemetry and export spans to Application Insights. Traces capture model calls, tool invocations, latency, token usage, and errors, which is the production-grade replacement for depending on classic list_run_steps(thread_id, run_id) calls.
-
 # Package direction for current client-side tracing:
 # pip install azure-ai-projects azure-identity opentelemetry-sdk azure-core-tracing-opentelemetry
 #
 # Configure the project's tracing / Application Insights connection, then run
 # the same Responses calls shown above. Foundry and OpenTelemetry record the
 # model/tool spans; inspect them in Foundry > Traces or Application Insights.
-
-The operational lesson is unchanged: use the trace to locate the slow or failing step before optimizing. The SDK surface changed; the observability principle did not.
 ```
 
+### Code block 9
 
-### Code block 13
-
-
-```text
-Current production evaluation works from observable evidence: response text, tool calls and outputs, citations, structured state, and OpenTelemetry traces. Evaluate whether the final decision follows from those observable artifacts, and use Foundry trace-based evaluation when you need a repeatable post-deployment dataset.
-
+```python
 def evaluate_routing_decision(routing_result: dict) -> str:
     evidence = {
         "research": routing_result["research"],
@@ -338,9 +284,7 @@ def evaluate_routing_decision(routing_result: dict) -> str:
 
 ## Hands-on lab: the full multi-agent workflow with an approval checkpoint
 
-
-### Code block 14
-
+### Code block 10
 
 ```python
 def process_claim_end_to_end(intake_audio_path: str) -> dict:
@@ -348,21 +292,10 @@ def process_claim_end_to_end(intake_audio_path: str) -> dict:
     if intake_result["status"] == "escalated":
         approval_request_id = queue_for_human_approval({"reason": intake_result["reason"], "priority": "high"})
         return {"status": "pending_approval", "approval_request_id": approval_request_id}
-```
-
-
-### Code block 15
-
-
-```text
+ 
     routing_result = supervisor_orchestrate(intake_result["extraction"])  # research -> summarize -> route
-```
-
-
-### Code block 16
-
-
-```text
+ 
     requires_approval = intake_result["extraction"]["requires_human_review"]
     return execute_action_with_approval(routing_result, requires_approval)
 ```
+
